@@ -13,7 +13,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-RUN python manage.py collectstatic --noinput || true
+RUN mkdir -p /app/static /app/media && python manage.py collectstatic --noinput || true
 
 EXPOSE 8000
 
