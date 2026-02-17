@@ -183,9 +183,53 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  bootstrap-runner:
+    runs-on: ubuntu-latest
+    if: vars.BOOTSTRAP_RUNNER == 'true'
+    steps:
+      - name: Bootstrap self-hosted runner via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT }}
+          debug: true
+          script_stop: true
+          script: |
+            set -e
+            if [ -d "$HOME/actions-runner" ]; then
+              echo "actions-runner directory exists"
+            else
+              mkdir -p "$HOME/actions-runner"
+            fi
+            cd "$HOME/actions-runner"
+            if [ -f "./actions-runner-linux-x64-${RUNNER_VERSION:-2.331.0}.tar.gz" ]; then
+              echo "Runner archive already present"
+            else
+              curl -o "actions-runner-linux-x64-${RUNNER_VERSION:-2.331.0}.tar.gz" -L "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION:-2.331.0}/actions-runner-linux-x64-${RUNNER_VERSION:-2.331.0}.tar.gz"
+            fi
+            if [ -d "./externals" ]; then
+              echo "Runner seems extracted"
+            else
+              tar xzf "./actions-runner-linux-x64-${RUNNER_VERSION:-2.331.0}.tar.gz"
+            fi
+            if ./svc.sh status >/dev/null 2>&1; then
+              echo "Runner service already installed"
+            else
+              ./config.sh --unattended --replace --url "${RUNNER_REPO_URL:-https://github.com/${GITHUB_REPOSITORY}}" --token "${RUNNER_TOKEN}" --labels "self-hosted,linux,x64" --name "$(hostname)-runner"
+              sudo ./svc.sh install
+            fi
+            sudo ./svc.sh start
+            ./svc.sh status || true
+        env:
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          RUNNER_REPO_URL: ${{ vars.RUNNER_REPO_URL }}
+          RUNNER_VERSION: ${{ vars.RUNNER_VERSION }}
+
   # Job 4b: Deploy via Self-Hosted Runner (no SSH)
   deploy-self-hosted:
-    needs: build
+    needs: [build, bootstrap-runner]
     runs-on: [self-hosted, linux, x64]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
