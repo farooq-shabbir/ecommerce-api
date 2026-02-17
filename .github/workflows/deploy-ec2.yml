@@ -25,7 +25,7 @@ jobs:
 
       - name: Ensure app directory exists on EC2
         run: |
-          ssh $EC2_USER@$EC2_HOST "mkdir -p $EC2_APP_DIR"
+          ssh $EC2_USER@$EC2_HOST "mkdir -p $EC2_APP_DIR $EC2_APP_DIR/static $EC2_APP_DIR/media"
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
@@ -41,13 +41,19 @@ jobs:
 
       - name: Build and run on EC2
         run: |
-          ssh $EC2_USER@$EC2_HOST << EOF
+          ssh $EC2_USER@$EC2_HOST << 'EOF'
             set -e
-            cd $EC2_APP_DIR
-            docker compose pull || true
-            docker compose down || true
-            docker compose up -d --build
-            docker system prune -f || true
+            # Install Docker if missing (Ubuntu)
+            if ! command -v docker >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y docker.io docker-compose-plugin
+              sudo systemctl enable --now docker || true
+            fi
+            cd "$EC2_APP_DIR"
+            sudo docker compose pull || true
+            sudo docker compose down || true
+            sudo docker compose up -d --build
+            sudo docker system prune -f || true
           EOF
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
