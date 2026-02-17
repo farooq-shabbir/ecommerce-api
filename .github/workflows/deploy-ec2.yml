@@ -41,18 +41,33 @@ jobs:
 
       - name: Build and run on EC2
         run: |
-          ssh $EC2_USER@$EC2_HOST << 'EOF'
+          ssh $EC2_USER@$EC2_HOST << EOF
             set -e
-            # Install Docker if missing (Ubuntu)
+            # Ensure prerequisites
+            sudo apt-get update -y
+            sudo apt-get install -y ca-certificates curl rsync
+
+            # Install Docker Engine via official script if missing (includes Compose v2)
             if ! command -v docker >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y docker.io docker-compose-plugin
+              curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+              sudo sh /tmp/get-docker.sh
               sudo systemctl enable --now docker || true
+              sudo usermod -aG docker $EC2_USER || true
             fi
+
+            # Ensure Docker Compose availability (fallback to standalone binary if plugin absent)
+            if ! docker compose version >/dev/null 2>&1; then
+              sudo curl -SL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+              COMPOSE_CMD="docker-compose"
+            else
+              COMPOSE_CMD="docker compose"
+            fi
+
             cd "$EC2_APP_DIR"
-            sudo docker compose pull || true
-            sudo docker compose down || true
-            sudo docker compose up -d --build
+            sudo $COMPOSE_CMD pull || true
+            sudo $COMPOSE_CMD down || true
+            sudo $COMPOSE_CMD up -d --build
             sudo docker system prune -f || true
           EOF
         env:
