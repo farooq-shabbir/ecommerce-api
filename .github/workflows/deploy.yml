@@ -271,6 +271,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Derive CI SSH key fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ci_key
+          chmod 600 ci_key
+          ssh-keygen -y -f ci_key > ci_key.pub
+          echo "Key type: $(awk '{print $1}' ci_key.pub)"
+          echo "Key fingerprint:"
+          ssh-keygen -lf ci_key.pub
+
+      - name: OpenSSH preflight (publickey only)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -x
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ci_key
+          chmod 600 ci_key
+          ssh -vvv -o StrictHostKeyChecking=no -o PreferredAuthentications=publickey -p "${{ secrets.SERVER_PORT }}" -i ci_key "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" "echo ok"
+
       - name: SSH preflight
         uses: appleboy/ssh-action@master
         with:
@@ -278,6 +298,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT }}
+          use_insecure_cipher: true
           debug: true
           script_stop: true
           script: |
