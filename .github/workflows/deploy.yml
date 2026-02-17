@@ -183,11 +183,114 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Job 4b: Deploy via Self-Hosted Runner (no SSH)
+  deploy-self-hosted:
+    needs: build
+    runs-on: [self-hosted, linux, x64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Bootstrap host (Docker, Compose, Firewall)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v docker >/dev/null 2>&1; then
+            echo "Docker is already installed"
+          else
+            echo "Installing Docker using get.docker.com script"
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh
+          fi
+          if id -nG "$USER" | tr ' ' '\n' | grep -qx "docker"; then
+            echo "User $USER already in docker group"
+          else
+            echo "Adding $USER to docker group"
+            sudo usermod -aG docker "$USER" || true
+          fi
+          if systemctl --version >/dev/null 2>&1; then
+            sudo systemctl enable --now docker || true
+          fi
+          if docker compose version >/dev/null 2>&1; then
+            echo "Docker Compose plugin available"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            echo "docker-compose (standalone) available"
+          else
+            if command -v apt-get >/dev/null 2>&1; then
+              echo "Installing docker-compose-plugin via apt"
+              sudo apt-get update -y
+              sudo apt-get install -y docker-compose-plugin || true
+            fi
+            if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+              echo "Installing docker-compose standalone binary"
+              ARCH="$(uname -m)"
+              OS="$(uname -s)"
+              URL="https://github.com/docker/compose/releases/latest/download/docker-compose-${OS}-${ARCH}"
+              sudo curl -L "$URL" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+            fi
+          fi
+          if command -v ufw >/dev/null 2>&1; then
+            echo "Configuring ufw rules (if ufw active)"
+            if sudo ufw status | grep -qi active; then
+              sudo ufw allow 80/tcp || true
+              sudo ufw allow 443/tcp || true
+              sudo ufw allow 8000/tcp || true
+            fi
+          elif command -v firewall-cmd >/dev/null 2>&1; then
+            echo "Configuring firewalld rules"
+            sudo firewall-cmd --permanent --add-service=http || true
+            sudo firewall-cmd --permanent --add-service=https || true
+            sudo firewall-cmd --permanent --add-port=8000/tcp || true
+            sudo firewall-cmd --reload || true
+          else
+            echo "No known firewall tool detected; skipping firewall configuration"
+          fi
+
+      - name: Compose build and up
+        shell: bash
+        run: |
+          set -e
+          SUDO=""
+          if docker info >/dev/null 2>&1; then
+            SUDO=""
+          elif sudo -n docker info >/dev/null 2>&1; then
+            SUDO="sudo"
+          else
+            echo "Docker daemon not accessible; attempting with sudo"
+            SUDO="sudo"
+          fi
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE_CMD="$SUDO docker compose"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE_CMD="$SUDO docker-compose"
+          else
+            echo "docker compose or docker-compose not found after bootstrap"
+            exit 1
+          fi
+          $COMPOSE_CMD build
+          $COMPOSE_CMD up -d
+          $COMPOSE_CMD ps
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -e
+          if curl -fsS http://localhost/api/products/products/ > /dev/null 2>&1; then
+            echo "API OK via nginx (port 80)"
+          elif curl -fsS http://localhost:8000/api/products/products/ > /dev/null 2>&1; then
+            echo "API OK via web (port 8000)"
+          else
+            echo "API health check failed"
+            exit 1
+          fi
+
   # Job 5: Setup Server (First deployment only)
   setup-server:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_VIA_SSH == 'true'
     
     steps:
       - name: Setup server with Docker
@@ -196,6 +299,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           debug: true
           script: |
@@ -231,7 +335,7 @@ jobs:
   backup-database:
     needs: setup-server
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_VIA_SSH == 'true'
     
     steps:
       - name: Backup production database
@@ -240,6 +344,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           debug: true
           script: |
@@ -265,7 +370,7 @@ jobs:
   deploy:
     needs: backup-database
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_VIA_SSH == 'true'
     
     steps:
       - name: Checkout code
@@ -296,7 +401,8 @@ jobs:
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          # Try password first to bypass key issues if server allows it
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           use_insecure_cipher: true
           debug: true
@@ -304,6 +410,18 @@ jobs:
           script: |
             echo "Connected to $(hostname) as $(whoami)"
             date
+      
+      - name: SSH preflight (key-based)
+        uses: appleboy/ssh-action@master
+        continue-on-error: true
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          debug: true
+          script: |
+            echo "Key-based preflight successful on $(hostname)"
 
       - name: Deploy to server via SSH
         uses: appleboy/ssh-action@master
@@ -311,6 +429,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           debug: true
           script: |
@@ -415,7 +534,7 @@ jobs:
   health-check:
     needs: deploy
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_VIA_SSH == 'true'
     
     steps:
       - name: Wait for deployment
@@ -447,6 +566,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}
@@ -465,6 +585,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}
@@ -488,7 +609,7 @@ jobs:
   post-deployment:
     needs: health-check
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_VIA_SSH == 'true'
     
     steps:
       - name: Check container logs
@@ -497,6 +618,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}
@@ -512,6 +634,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}
@@ -528,6 +651,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}
@@ -542,6 +666,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd ${{ secrets.PROJECT_PATH }}

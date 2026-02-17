@@ -55,7 +55,6 @@ services:
       # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - .:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
       - logs_volume:/app/logs
