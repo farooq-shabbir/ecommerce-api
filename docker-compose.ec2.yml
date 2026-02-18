@@ -1,12 +1,21 @@
 services:
   web:
-    build: .
+    image: ${IMAGE_TAG}
     container_name: ecommerce-api
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - DJANGO_DEBUG=${DJANGO_DEBUG}
       - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     volumes:
       - ./static:/app/static
       - ./media:/app/media

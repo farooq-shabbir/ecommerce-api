@@ -1,3 +1,58 @@
+// pipeline {
+//   agent any
+//   options {
+//     timestamps()
+//     disableConcurrentBuilds()
+//   }
+//   environment {
+//     DOCKER_IMAGE = 'ecommerce-api'
+//   }
+//   stages {
+//     stage('Checkout') {
+//       steps {
+//         checkout scm
+//       }
+//     }
+//     stage('Build') {
+//       steps {
+//         sh 'docker build -t ${DOCKER_IMAGE}:latest .'
+//       }
+//     }
+//     stage('Test') {
+//       steps {
+//         sh 'docker run --rm ${DOCKER_IMAGE}:latest sh -c "pytest -q"'
+//       }
+//     }
+//     stage('Smoke Test') {
+//       steps {
+//         sh 'docker run --rm ${DOCKER_IMAGE}:latest sh -c "python manage.py check"'
+//       }
+//     }
+//     stage('Deploy to EC2') {
+//       steps {
+//         withCredentials([
+//           string(credentialsId: 'ec2_host', variable: 'EC2_HOST'),
+//           string(credentialsId: 'django_allowed_hosts', variable: 'ALLOWED_HOSTS'),
+//           string(credentialsId: 'django_debug', variable: 'DJANGO_DEBUG'),
+//         ]) {
+//           sshagent(credentials: ['ec2_ssh']) {
+//             sh '''
+//               ssh -o StrictHostKeyChecking=no ${EC2_HOST} "set -e; if [ -d /home/ubuntu/ecommerce-api ]; then echo found /home/ubuntu/ecommerce-api; else mkdir -p /home/ubuntu/ecommerce-api; fi"
+//               tar czf - . | ssh -o StrictHostKeyChecking=no ${EC2_HOST} "tar xzf - -C /home/ubuntu/ecommerce-api"
+//               ssh -o StrictHostKeyChecking=no ${EC2_HOST} "cd /home/ubuntu/ecommerce-api && export DJANGO_ALLOWED_HOSTS='${ALLOWED_HOSTS}' && export DJANGO_DEBUG='${DJANGO_DEBUG}' && bash scripts/deploy_ec2.sh"
+//             '''
+//           }
+//         }
+//       }
+//     }
+//   }
+//   post {
+//     always {
+//       sh 'docker image ls ${DOCKER_IMAGE} | head -n 5'
+//     }
+//   }
+// }
+
 pipeline {
   agent any
   options {
@@ -6,49 +61,198 @@ pipeline {
   }
   environment {
     DOCKER_IMAGE = 'ecommerce-api'
+    DEPLOY_DIR   = '/home/ubuntu/ecommerce-api'
   }
+
   stages {
+
     stage('Checkout') {
       steps {
         checkout scm
       }
     }
+
     stage('Build') {
       steps {
-        sh 'docker build -t ${DOCKER_IMAGE}:latest .'
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub_credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh '''
+            docker build \
+              -t ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER} \
+              -t ${DOCKER_USER}/${DOCKER_IMAGE}:latest \
+              .
+          '''
+        }
       }
     }
+
     stage('Test') {
       steps {
-        sh 'docker run --rm ${DOCKER_IMAGE}:latest sh -c "pytest -q"'
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub_credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh 'docker run --rm ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER} sh -c "pytest -q"'
+        }
       }
     }
+
     stage('Smoke Test') {
       steps {
-        sh 'docker run --rm ${DOCKER_IMAGE}:latest sh -c "python manage.py check"'
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub_credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh 'docker run --rm ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER} sh -c "python manage.py check"'
+        }
       }
     }
-    stage('Deploy to EC2') {
+
+    stage('Push to Docker Hub') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub_credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh '''
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            docker push ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER}
+            docker push ${DOCKER_USER}/${DOCKER_IMAGE}:latest
+            docker logout
+          '''
+        }
+      }
+    }
+
+    stage('Provision EC2') {
       steps {
         withCredentials([
-          string(credentialsId: 'ec2_host', variable: 'EC2_HOST'),
-          string(credentialsId: 'django_allowed_hosts', variable: 'ALLOWED_HOSTS'),
-          string(credentialsId: 'django_debug', variable: 'DJANGO_DEBUG'),
+          string(credentialsId: 'ec2_host', variable: 'EC2_HOST')
         ]) {
           sshagent(credentials: ['ec2_ssh']) {
             sh '''
-              ssh -o StrictHostKeyChecking=no ${EC2_HOST} "set -e; if [ -d /home/ubuntu/ecommerce-api ]; then echo found /home/ubuntu/ecommerce-api; else mkdir -p /home/ubuntu/ecommerce-api; fi"
-              tar czf - . | ssh -o StrictHostKeyChecking=no ${EC2_HOST} "tar xzf - -C /home/ubuntu/ecommerce-api"
-              ssh -o StrictHostKeyChecking=no ${EC2_HOST} "cd /home/ubuntu/ecommerce-api && export DJANGO_ALLOWED_HOSTS='${ALLOWED_HOSTS}' && export DJANGO_DEBUG='${DJANGO_DEBUG}' && bash scripts/deploy_ec2.sh"
+              ssh -o StrictHostKeyChecking=no ubuntu@${EC2_HOST} bash << 'ENDSSH'
+                set -e
+
+                # ── Docker ──────────────────────────────────────────────
+                if command -v docker &>/dev/null; then
+                  echo "✅ Docker already installed: $(docker --version)"
+                else
+                  echo "⏳ Installing Docker..."
+                  sudo apt-get update -y
+                  sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+                  sudo install -m 0755 -d /etc/apt/keyrings
+                  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+                    | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+                  sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+                  echo \
+                    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+                    https://download.docker.com/linux/ubuntu \
+                    $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+                    | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+                  sudo apt-get update -y
+                  sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+                  sudo usermod -aG docker ubuntu
+                  sudo systemctl enable --now docker
+                  echo "✅ Docker installed: $(sudo docker --version)"
+                fi
+
+                # ── Docker Compose ───────────────────────────────────────
+                if docker compose version &>/dev/null; then
+                  echo "✅ Docker Compose already installed: $(docker compose version)"
+                else
+                  echo "⏳ Installing Docker Compose plugin..."
+                  sudo apt-get install -y docker-compose-plugin
+                  echo "✅ Docker Compose installed: $(docker compose version)"
+                fi
+
+                # ── Deploy directory ─────────────────────────────────────
+                mkdir -p /home/ubuntu/ecommerce-api
+                echo "✅ Deploy directory ready"
+ENDSSH
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy to EC2') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'ec2_host',            variable: 'EC2_HOST'),
+          string(credentialsId: 'django_allowed_hosts', variable: 'ALLOWED_HOSTS'),
+          string(credentialsId: 'django_debug',         variable: 'DJANGO_DEBUG'),
+          string(credentialsId: 'django_secret_key',    variable: 'SECRET_KEY'),
+          usernamePassword(
+            credentialsId: 'dockerhub_credentials',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+          )
+        ]) {
+          sshagent(credentials: ['ec2_ssh']) {
+
+            sh 'scp -o StrictHostKeyChecking=no docker-compose.yml ubuntu@${EC2_HOST}:${DEPLOY_DIR}/docker-compose.yml'
+
+            sh '''
+              ssh -o StrictHostKeyChecking=no ubuntu@${EC2_HOST} bash << ENDSSH
+                set -e
+                cd ${DEPLOY_DIR}
+
+                # Write .env — secrets stay out of the repo
+                cat > .env << EOF
+DJANGO_ALLOWED_HOSTS=${ALLOWED_HOSTS}
+DJANGO_DEBUG=${DJANGO_DEBUG}
+DJANGO_SECRET_KEY=${SECRET_KEY}
+IMAGE_TAG=${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER}
+EOF
+
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                docker pull ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER}
+
+                docker compose down --remove-orphans || true
+                docker compose up -d --force-recreate
+
+                docker logout
+                docker image prune -f
+
+                echo "✅ Deployment complete — build ${BUILD_NUMBER} is live"
+                docker compose ps
+ENDSSH
             '''
           }
         }
       }
     }
   }
+
   post {
+    success {
+      echo "🚀 Build ${BUILD_NUMBER} deployed successfully"
+    }
+    failure {
+      echo "❌ Pipeline failed — check logs above"
+    }
     always {
-      sh 'docker image ls ${DOCKER_IMAGE} | head -n 5'
+      withCredentials([usernamePassword(
+        credentialsId: 'dockerhub_credentials',
+        usernameVariable: 'DOCKER_USER',
+        passwordVariable: 'DOCKER_PASS'
+      )]) {
+        sh '''
+          docker rmi ${DOCKER_USER}/${DOCKER_IMAGE}:${BUILD_NUMBER} || true
+          docker rmi ${DOCKER_USER}/${DOCKER_IMAGE}:latest || true
+        '''
+      }
     }
   }
 }
