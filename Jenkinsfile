@@ -37,7 +37,9 @@ pipeline {
         ]) {
           sshagent(credentials: ['ec2_ssh']) {
             sh '''
-              ssh -o StrictHostKeyChecking=no ${EC2_HOST} "cd ~/ecommerce-api && git pull && export DJANGO_ALLOWED_HOSTS='${ALLOWED_HOSTS}' && export DJANGO_DEBUG='${DJANGO_DEBUG}' && bash scripts/deploy_ec2.sh"
+              ssh -o StrictHostKeyChecking=no ${EC2_HOST} "set -e; REPO=\\\"/home/ubuntu/ecommerce-api\\\"; if [ -d \\\"$REPO\\\" ]; then echo \\\"found $REPO\\\"; else mkdir -p \\\"$REPO\\\"; fi"
+              tar czf - . | ssh -o StrictHostKeyChecking=no ${EC2_HOST} "tar xzf - -C \\\"/home/ubuntu/ecommerce-api\\\""
+              ssh -o StrictHostKeyChecking=no ${EC2_HOST} "cd \\\"/home/ubuntu/ecommerce-api\\\" && export DJANGO_ALLOWED_HOSTS='${ALLOWED_HOSTS}' && export DJANGO_DEBUG='${DJANGO_DEBUG}' && bash scripts/deploy_ec2.sh"
             '''
           }
         }
