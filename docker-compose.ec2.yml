@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    container_name: ecommerce-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_DEBUG=${DJANGO_DEBUG}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS}
+    volumes:
+      - ./static:/app/static
+      - ./media:/app/media
+    restart: unless-stopped
